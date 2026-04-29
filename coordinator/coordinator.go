@@ -7,6 +7,7 @@ import (
     "net"
     "net/rpc"
     "os"
+    "path/filepath"
     "strconv"
     "strings"
     "sync"
@@ -24,18 +25,32 @@ type PendingTask struct {
     batchUrls []string
     intermediateFiles []common.IntermediateFileRef
     outputFiles []string
+    file string
     taskType common.TaskType
     status string
     ownerWorker int
+    destinationWorker int
+    destinationWorkerAddr string
+    reduceID int
+}
+
+type ReduceOutputState struct {
+    reduceID int
+    fileName string
+    primaryWorker int
+    holders map[int]bool
+    pendingReplicaTasks map[int]bool
 }
 
 type CoordinatorAPI struct {
     Tasks []PendingTask
     MapTasks []PendingTask
+    ReduceTasks []PendingTask
     R int
     numWorkers int
     MaxVisitedUrls int
     VisitedUrlCount int
+    DesiredReplicaCount int
     CompleteTaskCount int
     TasksComplete bool
     currentPhase common.TaskType
@@ -46,6 +61,7 @@ type CoordinatorAPI struct {
     workerPortBase int
     lastHeartBeat map[int]time.Time
     failedWorkers map[int]bool
+    ReduceOutputs map[int]*ReduceOutputState
     mu sync.Mutex
 }
 
@@ -63,7 +79,7 @@ func (coord *CoordinatorAPI) HeartBeat(request common.HeartBeatRequest, response
 
     coord.registerWorker(request.WorkerID, request.WorkerAddr)
     response.Acknowledged = true
-    response.CoordinatorDone = coord.TasksComplete && coord.currentPhase == common.ReduceTask
+    response.CoordinatorDone = coord.currentPhase == common.DoneTask
     return nil
 }
 
@@ -80,12 +96,25 @@ func (coord *CoordinatorAPI) GetWork(request common.TaskRequest, response *commo
         NumReduce: coord.R,
     }
 
+    if coord.currentPhase == common.DoneTask {
+        response.TaskType = common.DoneTask
+        return nil
+    }
+
     if coord.TasksComplete {
-        if coord.currentPhase == common.MapTask {
+        switch coord.currentPhase {
+        case common.MapTask:
             coord.initializeReduceTasks()
-        } else {
-            response.TaskType = common.DoneTask
-            return nil
+        case common.ReduceTask:
+            coord.initializeReplicationTasks()
+        case common.ReplicateTask:
+            coord.appendMissingReplicationTasks()
+            coord.updateCompletionState()
+            if coord.TasksComplete && coord.replicationSatisfied() {
+                coord.currentPhase = common.DoneTask
+                response.TaskType = common.DoneTask
+                return nil
+            }
         }
     }
 
@@ -111,9 +140,19 @@ func (coord *CoordinatorAPI) GetWork(request common.TaskRequest, response *commo
             }
         }
 
+        if coord.Tasks[i].taskType == common.ReplicateTask {
+            response.ReplicaFile = coord.Tasks[i].file
+            response.ReplicaReduceID = coord.Tasks[i].reduceID
+            response.ReplicaDestinationWorker = coord.Tasks[i].destinationWorker
+            response.ReplicaDestinationAddr = coord.Tasks[i].destinationWorkerAddr
+        }
+
         coord.Tasks[i].status = "working"
         if coord.currentPhase == common.MapTask {
             coord.MapTasks[coord.Tasks[i].id] = coord.Tasks[i]
+        }
+        if coord.currentPhase == common.ReduceTask {
+            coord.ReduceTasks[coord.Tasks[i].id] = coord.Tasks[i]
         }
 
         return nil
@@ -134,19 +173,25 @@ func (coord *CoordinatorAPI) CompleteWork(request common.TaskDoneRequest, respon
     }
 
     if !request.TaskSuccess {
-        coord.resetTask(request.TaskID, request.WorkerID)
-        if request.TaskType == common.ReduceTask && len(request.MissingInputs) > 0 {
-            coord.restoreMissingMapTasks(request.MissingInputs)
+        switch request.TaskType {
+        case common.MapTask:
+            coord.resetMapTask(request.TaskID, request.WorkerID)
+        case common.ReduceTask:
+            if len(request.MissingInputs) > 0 {
+                coord.restoreMissingMapTasks(request.MissingInputs)
+            } else {
+                coord.resetReduceTask(request.TaskID, request.WorkerID)
+            }
+        case common.ReplicateTask:
+            coord.resetReplicationTask(request.TaskID, request.WorkerID)
         }
+
+        coord.updateCompletionState()
         response.Complete = false
         return nil
     }
 
-    if coord.Tasks[request.TaskID].status != "complete" {
-        coord.CompleteTaskCount += 1
-        coord.Tasks[request.TaskID].status = "complete"
-    }
-
+    coord.Tasks[request.TaskID].status = "complete"
     coord.Tasks[request.TaskID].ownerWorker = request.WorkerID
     coord.Tasks[request.TaskID].outputFiles = append([]string(nil), request.OutputFiles...)
 
@@ -157,15 +202,35 @@ func (coord *CoordinatorAPI) CompleteWork(request common.TaskDoneRequest, respon
         coord.createMapTasksFromFrontier()
     }
 
+    if request.TaskType == common.ReduceTask {
+        coord.ReduceTasks[request.TaskID] = coord.Tasks[request.TaskID]
+        coord.recordReduceOutput(request.TaskID, request.WorkerID, firstFileName(request.OutputFiles, request.TaskID))
+    }
+
+    if request.TaskType == common.ReplicateTask {
+        coord.markReplicaStored(coord.Tasks[request.TaskID].reduceID, coord.Tasks[request.TaskID].destinationWorker)
+    }
+
     coord.updateCompletionState()
-    response.Complete = coord.TasksComplete && coord.currentPhase == common.ReduceTask
+
+    if coord.currentPhase == common.ReplicateTask && coord.TasksComplete {
+        coord.appendMissingReplicationTasks()
+        coord.updateCompletionState()
+        if coord.TasksComplete && coord.replicationSatisfied() {
+            coord.currentPhase = common.DoneTask
+            response.Complete = true
+            return nil
+        }
+    }
+
+    response.Complete = coord.currentPhase == common.DoneTask
     return nil
 }
 
 func (coord *CoordinatorAPI) initializeReduceTasks() {
     coord.Tasks = nil
-    coord.CompleteTaskCount = 0
-    coord.TasksComplete = false
+    coord.ReduceTasks = nil
+    coord.ReduceOutputs = make(map[int]*ReduceOutputState)
     coord.currentPhase = common.ReduceTask
 
     for i := 0; i < coord.R; i++ {
@@ -173,7 +238,8 @@ func (coord *CoordinatorAPI) initializeReduceTasks() {
             id: i,
             taskType: common.ReduceTask,
             status: "idle",
-            ownerWorker: (i % coord.numWorkers) + 1,
+            ownerWorker: coord.reduceOwner(i),
+            reduceID: i,
         }
 
         for mapTaskID := range len(coord.MapTasks) {
@@ -185,14 +251,29 @@ func (coord *CoordinatorAPI) initializeReduceTasks() {
         }
 
         coord.Tasks = append(coord.Tasks, reduceTask)
+        coord.ReduceTasks = append(coord.ReduceTasks, reduceTask)
     }
 
-    if len(coord.Tasks) == 0 {
-        coord.TasksComplete = true
-    }
+    coord.updateCompletionState()
 }
 
-func StartCoordinator(r int, numWorkers int, maxVisitedUrls int, file *os.File) {
+func (coord *CoordinatorAPI) initializeReplicationTasks() {
+    coord.Tasks = nil
+    coord.currentPhase = common.ReplicateTask
+
+    for reduceID := range coord.R {
+        output := coord.ReduceOutputs[reduceID]
+        if output == nil {
+            continue
+        }
+        output.pendingReplicaTasks = make(map[int]bool)
+    }
+
+    coord.appendMissingReplicationTasks()
+    coord.updateCompletionState()
+}
+
+func StartCoordinator(r int, numWorkers int, maxVisitedUrls int, desiredReplicaCount int, file *os.File) {
     if numWorkers < 1 {
         numWorkers = 1
     }
@@ -201,6 +282,7 @@ func StartCoordinator(r int, numWorkers int, maxVisitedUrls int, file *os.File) 
         R: r,
         numWorkers: numWorkers,
         MaxVisitedUrls: maxVisitedUrls,
+        DesiredReplicaCount: desiredReplicaCount,
         currentPhase: common.MapTask,
         seenUrls: make(map[string]bool),
         workerAddresses: make(map[int]string),
@@ -208,6 +290,7 @@ func StartCoordinator(r int, numWorkers int, maxVisitedUrls int, file *os.File) 
         workerPortBase: getEnvInt("WORKER_PORT_BASE", 9100),
         lastHeartBeat: make(map[int]time.Time),
         failedWorkers: make(map[int]bool),
+        ReduceOutputs: make(map[int]*ReduceOutputState),
     }
 
     for workerID := 1; workerID <= numWorkers; workerID++ {
@@ -352,8 +435,8 @@ func (coord *CoordinatorAPI) buildIntermediateFiles(taskID int, outputFiles []st
 func (coord *CoordinatorAPI) restoreMissingMapTasks(missingInputs []common.IntermediateFileRef) {
     coord.currentPhase = common.MapTask
     coord.Tasks = nil
-    coord.CompleteTaskCount = 0
-    coord.TasksComplete = false
+    coord.ReduceTasks = nil
+    coord.ReduceOutputs = make(map[int]*ReduceOutputState)
 
     missingMapTasks := make(map[int]bool)
     for _, input := range missingInputs {
@@ -373,43 +456,279 @@ func (coord *CoordinatorAPI) restoreMissingMapTasks(missingInputs []common.Inter
 
     for i := range len(coord.MapTasks) {
         coord.Tasks = append(coord.Tasks, coord.MapTasks[i])
-        if coord.MapTasks[i].status == "complete" {
-            coord.CompleteTaskCount += 1
-        }
     }
+
+    coord.updateCompletionState()
 }
 
-func (coord *CoordinatorAPI) resetTask(taskID int, failedWorker int) {
-    if taskID < 0 || taskID >= len(coord.Tasks) {
+func (coord *CoordinatorAPI) restoreReduceTasks(reduceIDs []int) {
+    if len(coord.ReduceTasks) == 0 {
+        coord.initializeReduceTasks()
         return
     }
 
-    if coord.Tasks[taskID].status == "complete" && coord.CompleteTaskCount > 0 {
-        coord.CompleteTaskCount -= 1
+    missingReduceTasks := make(map[int]bool)
+    for _, reduceID := range reduceIDs {
+        missingReduceTasks[reduceID] = true
+    }
+
+    coord.currentPhase = common.ReduceTask
+    coord.Tasks = nil
+
+    for reduceID := range missingReduceTasks {
+        if reduceID < 0 || reduceID >= len(coord.ReduceTasks) {
+            continue
+        }
+
+        coord.ReduceTasks[reduceID].status = "idle"
+        coord.ReduceTasks[reduceID].ownerWorker = coord.reassignWorker(reduceID, 0)
+        coord.ReduceTasks[reduceID].outputFiles = nil
+        delete(coord.ReduceOutputs, reduceID)
+    }
+
+    for i := range len(coord.ReduceTasks) {
+        coord.Tasks = append(coord.Tasks, coord.ReduceTasks[i])
+    }
+
+    coord.updateCompletionState()
+}
+
+func (coord *CoordinatorAPI) resetMapTask(taskID int, failedWorker int) {
+    if taskID < 0 || taskID >= len(coord.Tasks) {
+        return
     }
 
     coord.Tasks[taskID].status = "idle"
     coord.Tasks[taskID].ownerWorker = coord.reassignWorker(taskID, failedWorker)
     coord.Tasks[taskID].outputFiles = nil
-    if coord.Tasks[taskID].taskType == common.MapTask {
-        coord.Tasks[taskID].intermediateFiles = nil
-        coord.MapTasks[taskID] = coord.Tasks[taskID]
-    }
-
-    coord.TasksComplete = false
+    coord.Tasks[taskID].intermediateFiles = nil
+    coord.MapTasks[taskID] = coord.Tasks[taskID]
 }
 
-func (coord *CoordinatorAPI) updateCompletionState() {
-    coord.TasksComplete = false
-
-    if len(coord.Tasks) == 0 {
-        coord.TasksComplete = true
+func (coord *CoordinatorAPI) resetReduceTask(taskID int, failedWorker int) {
+    if taskID < 0 || taskID >= len(coord.Tasks) {
         return
     }
 
-    if coord.CompleteTaskCount == len(coord.Tasks) {
-        coord.TasksComplete = true
+    coord.Tasks[taskID].status = "idle"
+    coord.Tasks[taskID].ownerWorker = coord.reassignWorker(taskID, failedWorker)
+    coord.Tasks[taskID].outputFiles = nil
+    coord.ReduceTasks[taskID] = coord.Tasks[taskID]
+    delete(coord.ReduceOutputs, taskID)
+}
+
+func (coord *CoordinatorAPI) resetReplicationTask(taskID int, failedWorker int) {
+    if taskID < 0 || taskID >= len(coord.Tasks) {
+        return
     }
+
+    task := coord.Tasks[taskID]
+    output := coord.ReduceOutputs[task.reduceID]
+    if output != nil {
+        delete(output.pendingReplicaTasks, task.destinationWorker)
+    }
+
+    if output == nil || len(output.holders) == 0 {
+        coord.restoreReduceTasks([]int{task.reduceID})
+        return
+    }
+
+    sourceWorker := coord.pickReplicaSourceWorker(output)
+    destinationWorker := coord.pickReplicaDestinationWorker(output)
+    if sourceWorker == 0 || destinationWorker == 0 {
+        task.status = "complete"
+        coord.Tasks[taskID] = task
+        return
+    }
+
+    task.status = "idle"
+    task.ownerWorker = sourceWorker
+    task.destinationWorker = destinationWorker
+    task.destinationWorkerAddr = coord.workerAddresses[destinationWorker]
+    coord.Tasks[taskID] = task
+    output.pendingReplicaTasks[destinationWorker] = true
+}
+
+func (coord *CoordinatorAPI) updateCompletionState() {
+    coord.CompleteTaskCount = 0
+
+    for i := range len(coord.Tasks) {
+        if coord.Tasks[i].status == "complete" {
+            coord.CompleteTaskCount += 1
+        }
+    }
+
+    coord.TasksComplete = len(coord.Tasks) == 0 || coord.CompleteTaskCount == len(coord.Tasks)
+}
+
+func (coord *CoordinatorAPI) recordReduceOutput(reduceID int, workerID int, fileName string) {
+    coord.ReduceOutputs[reduceID] = &ReduceOutputState{
+        reduceID: reduceID,
+        fileName: fileName,
+        primaryWorker: workerID,
+        holders: map[int]bool{workerID: true},
+        pendingReplicaTasks: make(map[int]bool),
+    }
+}
+
+func (coord *CoordinatorAPI) markReplicaStored(reduceID int, workerID int) {
+    output := coord.ReduceOutputs[reduceID]
+    if output == nil {
+        return
+    }
+
+    delete(output.pendingReplicaTasks, workerID)
+    output.holders[workerID] = true
+}
+
+func (coord *CoordinatorAPI) appendMissingReplicationTasks() {
+    if coord.currentPhase != common.ReplicateTask {
+        return
+    }
+
+    for reduceID := range len(coord.ReduceTasks) {
+        output := coord.ReduceOutputs[reduceID]
+        if output == nil {
+            continue
+        }
+
+        if len(output.holders) == 0 {
+            coord.restoreReduceTasks([]int{reduceID})
+            return
+        }
+
+        for coord.outputCopyCount(output) < coord.requiredCopyCount() {
+            sourceWorker := coord.pickReplicaSourceWorker(output)
+            destinationWorker := coord.pickReplicaDestinationWorker(output)
+            if sourceWorker == 0 || destinationWorker == 0 {
+                break
+            }
+
+            task := PendingTask{
+                id: len(coord.Tasks),
+                file: output.fileName,
+                taskType: common.ReplicateTask,
+                status: "idle",
+                ownerWorker: sourceWorker,
+                destinationWorker: destinationWorker,
+                destinationWorkerAddr: coord.workerAddresses[destinationWorker],
+                reduceID: reduceID,
+            }
+
+            coord.Tasks = append(coord.Tasks, task)
+            output.pendingReplicaTasks[destinationWorker] = true
+        }
+    }
+}
+
+func (coord *CoordinatorAPI) replicationSatisfied() bool {
+    if len(coord.ReduceTasks) == 0 {
+        return true
+    }
+
+    for reduceID := range len(coord.ReduceTasks) {
+        output := coord.ReduceOutputs[reduceID]
+        if output == nil {
+            return false
+        }
+        if len(output.holders) < coord.requiredCopyCount() {
+            return false
+        }
+    }
+
+    return true
+}
+
+func (coord *CoordinatorAPI) outputCopyCount(output *ReduceOutputState) int {
+    return len(output.holders) + len(output.pendingReplicaTasks)
+}
+
+func (coord *CoordinatorAPI) requiredCopyCount() int {
+    requiredCopies := coord.DesiredReplicaCount + 1
+    activeWorkers := coord.activeWorkerCount()
+    if requiredCopies > activeWorkers {
+        return activeWorkers
+    }
+    if requiredCopies < 1 {
+        return 1
+    }
+    return requiredCopies
+}
+
+func (coord *CoordinatorAPI) activeWorkerCount() int {
+    activeWorkers := 0
+    for workerID := 1; workerID <= coord.numWorkers; workerID++ {
+        if coord.failedWorkers[workerID] {
+            continue
+        }
+        activeWorkers += 1
+    }
+
+    if activeWorkers < 1 {
+        return 1
+    }
+
+    return activeWorkers
+}
+
+func (coord *CoordinatorAPI) pickReplicaSourceWorker(output *ReduceOutputState) int {
+    if output.holders[output.primaryWorker] && !coord.failedWorkers[output.primaryWorker] {
+        return output.primaryWorker
+    }
+
+    for workerID := 1; workerID <= coord.numWorkers; workerID++ {
+        if coord.failedWorkers[workerID] {
+            continue
+        }
+        if output.holders[workerID] {
+            return workerID
+        }
+    }
+
+    return 0
+}
+
+func (coord *CoordinatorAPI) pickReplicaDestinationWorker(output *ReduceOutputState) int {
+    bestWorkerID := 0
+    bestUtilization := 0
+
+    for workerID := 1; workerID <= coord.numWorkers; workerID++ {
+        if coord.failedWorkers[workerID] {
+            continue
+        }
+        if output.holders[workerID] || output.pendingReplicaTasks[workerID] {
+            continue
+        }
+
+        utilization := coord.replicaUtilization(workerID)
+        if bestWorkerID == 0 || utilization < bestUtilization || (utilization == bestUtilization && workerID < bestWorkerID) {
+            bestWorkerID = workerID
+            bestUtilization = utilization
+        }
+    }
+
+    return bestWorkerID
+}
+
+func (coord *CoordinatorAPI) replicaUtilization(workerID int) int {
+    replicaCount := 0
+
+    for reduceID := range len(coord.ReduceTasks) {
+        output := coord.ReduceOutputs[reduceID]
+        if output == nil {
+            continue
+        }
+
+        if workerID != output.primaryWorker && output.holders[workerID] {
+            replicaCount += 1
+        }
+
+        if output.pendingReplicaTasks[workerID] {
+            replicaCount += 1
+        }
+    }
+
+    return replicaCount
 }
 
 func (coord *CoordinatorAPI) registerWorker(workerID int, workerAddr string) {
@@ -469,36 +788,156 @@ func (coord *CoordinatorAPI) reassignTimedOutWorkers() {
 }
 
 func (coord *CoordinatorAPI) reassignWorkerTasks(workerID int) {
-    if coord.currentPhase == common.MapTask {
-        for i := range len(coord.Tasks) {
-            if coord.Tasks[i].ownerWorker != workerID {
-                continue
-            }
-            coord.resetTask(i, workerID)
+    switch coord.currentPhase {
+    case common.MapTask:
+        coord.resetOwnedMapTasks(workerID)
+        lostInputs := coord.findLostIntermediateFiles(workerID)
+        if len(lostInputs) > 0 {
+            coord.restoreMissingMapTasks(lostInputs)
+        } else {
+            coord.updateCompletionState()
         }
-        return
-    }
+    case common.ReduceTask:
+        lostInputs := coord.findLostIntermediateFiles(workerID)
+        if len(lostInputs) > 0 {
+            coord.restoreMissingMapTasks(lostInputs)
+            return
+        }
 
-    missingInputs := make([]common.IntermediateFileRef, 0)
-    for i := range len(coord.MapTasks) {
-        for _, fileRef := range coord.MapTasks[i].intermediateFiles {
+        lostReduceIDs := coord.removeWorkerFromOutputs(workerID)
+        if len(lostReduceIDs) > 0 {
+            coord.restoreReduceTasks(lostReduceIDs)
+            return
+        }
+
+        coord.resetOwnedReduceTasks(workerID)
+        coord.updateCompletionState()
+    case common.ReplicateTask:
+        lostReduceIDs := coord.removeWorkerFromOutputs(workerID)
+        if len(lostReduceIDs) > 0 {
+            coord.restoreReduceTasks(lostReduceIDs)
+            return
+        }
+
+        coord.reconfigureReplicationTasks(workerID)
+        coord.appendMissingReplicationTasks()
+        coord.updateCompletionState()
+    }
+}
+
+func (coord *CoordinatorAPI) resetOwnedMapTasks(workerID int) {
+    for mapTaskID := range len(coord.MapTasks) {
+        if coord.MapTasks[mapTaskID].ownerWorker != workerID {
+            continue
+        }
+        if coord.MapTasks[mapTaskID].status == "complete" {
+            continue
+        }
+
+        coord.MapTasks[mapTaskID].status = "idle"
+        coord.MapTasks[mapTaskID].ownerWorker = coord.reassignWorker(mapTaskID, workerID)
+        coord.MapTasks[mapTaskID].outputFiles = nil
+        coord.MapTasks[mapTaskID].intermediateFiles = nil
+        if mapTaskID < len(coord.Tasks) {
+            coord.Tasks[mapTaskID] = coord.MapTasks[mapTaskID]
+        }
+    }
+}
+
+func (coord *CoordinatorAPI) resetOwnedReduceTasks(workerID int) {
+    for reduceID := range len(coord.ReduceTasks) {
+        if coord.ReduceTasks[reduceID].ownerWorker != workerID {
+            continue
+        }
+        if coord.ReduceTasks[reduceID].status == "complete" {
+            continue
+        }
+
+        coord.ReduceTasks[reduceID].status = "idle"
+        coord.ReduceTasks[reduceID].ownerWorker = coord.reassignWorker(reduceID, workerID)
+        coord.ReduceTasks[reduceID].outputFiles = nil
+        if reduceID < len(coord.Tasks) {
+            coord.Tasks[reduceID] = coord.ReduceTasks[reduceID]
+        }
+    }
+}
+
+func (coord *CoordinatorAPI) findLostIntermediateFiles(workerID int) []common.IntermediateFileRef {
+    lostInputs := make([]common.IntermediateFileRef, 0)
+    seenMapTasks := make(map[int]bool)
+
+    for mapTaskID := range len(coord.MapTasks) {
+        if coord.MapTasks[mapTaskID].status != "complete" {
+            continue
+        }
+
+        for _, fileRef := range coord.MapTasks[mapTaskID].intermediateFiles {
             if fileRef.WorkerID != workerID {
                 continue
             }
-            missingInputs = append(missingInputs, fileRef)
+            if seenMapTasks[fileRef.MapTaskID] {
+                continue
+            }
+
+            seenMapTasks[fileRef.MapTaskID] = true
+            lostInputs = append(lostInputs, fileRef)
         }
     }
 
-    if len(missingInputs) > 0 {
-        coord.restoreMissingMapTasks(missingInputs)
-        return
-    }
+    return lostInputs
+}
 
-    for i := range len(coord.Tasks) {
-        if coord.Tasks[i].ownerWorker != workerID {
+func (coord *CoordinatorAPI) removeWorkerFromOutputs(workerID int) []int {
+    lostReduceIDs := make([]int, 0)
+
+    for reduceID := range len(coord.ReduceTasks) {
+        output := coord.ReduceOutputs[reduceID]
+        if output == nil {
             continue
         }
-        coord.resetTask(i, workerID)
+
+        delete(output.holders, workerID)
+        delete(output.pendingReplicaTasks, workerID)
+
+        if len(output.holders) == 0 {
+            lostReduceIDs = append(lostReduceIDs, reduceID)
+        }
+    }
+
+    return lostReduceIDs
+}
+
+func (coord *CoordinatorAPI) reconfigureReplicationTasks(workerID int) {
+    for taskID := range len(coord.Tasks) {
+        if coord.Tasks[taskID].taskType != common.ReplicateTask {
+            continue
+        }
+        if coord.Tasks[taskID].status == "complete" {
+            continue
+        }
+        if coord.Tasks[taskID].ownerWorker != workerID && coord.Tasks[taskID].destinationWorker != workerID {
+            continue
+        }
+
+        output := coord.ReduceOutputs[coord.Tasks[taskID].reduceID]
+        if output == nil {
+            continue
+        }
+
+        delete(output.pendingReplicaTasks, coord.Tasks[taskID].destinationWorker)
+
+        sourceWorker := coord.pickReplicaSourceWorker(output)
+        destinationWorker := coord.pickReplicaDestinationWorker(output)
+        if sourceWorker == 0 || destinationWorker == 0 {
+            coord.Tasks[taskID].status = "complete"
+            continue
+        }
+
+        coord.Tasks[taskID].status = "idle"
+        coord.Tasks[taskID].ownerWorker = sourceWorker
+        coord.Tasks[taskID].destinationWorker = destinationWorker
+        coord.Tasks[taskID].destinationWorkerAddr = coord.workerAddresses[destinationWorker]
+        output.pendingReplicaTasks[destinationWorker] = true
     }
 }
 
@@ -535,4 +974,12 @@ func getEnvString(name string, fallback string) string {
     }
 
     return value
+}
+
+func firstFileName(outputFiles []string, reduceID int) string {
+    if len(outputFiles) > 0 && strings.TrimSpace(outputFiles[0]) != "" {
+        return filepath.Base(strings.TrimSpace(outputFiles[0]))
+    }
+
+    return fmt.Sprintf("reduce-%03d.json", reduceID)
 }

@@ -5,6 +5,7 @@ type TaskType string
 const (
     MapTask TaskType = "map"
     ReduceTask TaskType = "reduce"
+    ReplicateTask TaskType = "replicate"
     WaitTask TaskType = "wait"
     DoneTask TaskType = "done"
 )
@@ -47,6 +48,10 @@ type TaskResponse struct {
     FileNames []string
     IntermediateFiles []IntermediateFileRef
     OwnerWorker int
+    ReplicaFile string
+    ReplicaReduceID int
+    ReplicaDestinationWorker int
+    ReplicaDestinationAddr string
 }
 
 type TaskDoneRequest struct {
@@ -74,5 +79,16 @@ type IntermediateTransferRequest struct {
 }
 
 type IntermediateTransferResponse struct {
+    Stored bool
+}
+
+type ReplicaTransferRequest struct {
+    FromWorkerID int
+    ReduceID int
+    FileName string
+    Data string
+}
+
+type ReplicaTransferResponse struct {
     Stored bool
 }

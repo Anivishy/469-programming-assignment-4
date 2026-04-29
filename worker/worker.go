@@ -76,6 +76,10 @@ func (w *Worker) run() error {
         return err
     }
 
+    if err := os.MkdirAll(w.replicaDir(), 0o755); err != nil {
+        return err
+    }
+
     server := rpc.NewServer()
     if err := server.RegisterName("Worker", w); err != nil {
         return err
@@ -188,6 +192,13 @@ func (w *Worker) workLoop() error {
                     return nil
                 }
             }
+        case common.ReplicateTask:
+            if err := w.processTask(task); err != nil {
+                log.Printf("worker %d replicate task %d handling error: %v", w.id, task.TaskID, err)
+                if w.sleepOrDone(rpcRetryDelay) {
+                    return nil
+                }
+            }
         case common.WaitTask:
             if w.sleepOrDone(taskPollInterval) {
                 return nil
@@ -244,6 +255,8 @@ func (w *Worker) executeTask(task common.TaskResponse) common.TaskDoneRequest {
         return w.executeMapTask(task)
     case common.ReduceTask:
         return w.executeReduceTask(task)
+    case common.ReplicateTask:
+        return w.executeReplicateTask(task)
     default:
         return common.TaskDoneRequest{
             WorkerID: w.id,
@@ -370,6 +383,37 @@ func (w *Worker) executeReduceTask(task common.TaskResponse) common.TaskDoneRequ
     return completion
 }
 
+func (w *Worker) executeReplicateTask(task common.TaskResponse) common.TaskDoneRequest {
+    completion := common.TaskDoneRequest{
+        WorkerID: w.id,
+        WorkerAddr: w.advertiseAddr,
+        TaskType: common.ReplicateTask,
+        TaskID: task.TaskID,
+    }
+
+    if task.ReplicaFile == "" {
+        completion.TaskSuccess = false
+        completion.ErrorMessage = "missing replica source file"
+        return completion
+    }
+
+    if task.ReplicaDestinationAddr == "" {
+        completion.TaskSuccess = false
+        completion.ErrorMessage = "missing replica destination address"
+        return completion
+    }
+
+    if err := w.transferReplicaFile(task.ReplicaReduceID, task.ReplicaFile, task.ReplicaDestinationAddr); err != nil {
+        completion.TaskSuccess = false
+        completion.ErrorMessage = err.Error()
+        return completion
+    }
+
+    completion.OutputFiles = []string{task.ReplicaFile}
+    completion.TaskSuccess = true
+    return completion
+}
+
 func (w *Worker) fetchPageData(rawURL string) ([]string, []string, error) {
     response, err := w.httpClient.Get(rawURL)
     if err != nil {
@@ -482,9 +526,36 @@ func (w *Worker) transferIntermediateFile(mapTaskID int, reduceID int, fileName 
     return callRPC(destinationAddr, "Worker.StoreIntermediate", request, &response)
 }
 
+func (w *Worker) transferReplicaFile(reduceID int, fileName string, destinationAddr string) error {
+    data, err := w.readReduceOrReplicaFile(fileName)
+    if err != nil {
+        return err
+    }
+
+    request := common.ReplicaTransferRequest{
+        FromWorkerID: w.id,
+        ReduceID: reduceID,
+        FileName: fileName,
+        Data: string(data),
+    }
+    var response common.ReplicaTransferResponse
+
+    return callRPC(destinationAddr, "Worker.StoreReplica", request, &response)
+}
+
 func (w *Worker) StoreIntermediate(request common.IntermediateTransferRequest, response *common.IntermediateTransferResponse) error {
     fileName := fmt.Sprintf("map-%03d-reduce-%03d.json", request.MapTaskID, request.ReduceID)
     filePath := filepath.Join(w.intermediateDir(), fileName)
+    if err := os.WriteFile(filePath, []byte(request.Data), 0o644); err != nil {
+        return err
+    }
+
+    response.Stored = true
+    return nil
+}
+
+func (w *Worker) StoreReplica(request common.ReplicaTransferRequest, response *common.ReplicaTransferResponse) error {
+    filePath := filepath.Join(w.replicaDir(), filepath.Base(request.FileName))
     if err := os.WriteFile(filePath, []byte(request.Data), 0o644); err != nil {
         return err
     }
@@ -540,6 +611,10 @@ func (w *Worker) intermediateDir() string {
 
 func (w *Worker) reduceDir() string {
     return filepath.Join(w.dataDir, "reduce")
+}
+
+func (w *Worker) replicaDir() string {
+    return filepath.Join(w.dataDir, "replica")
 }
 
 func partitionWord(word string, numReduce int) int {
@@ -619,6 +694,16 @@ func writeJSONFile(filePath string, value any) error {
     }
 
     return os.WriteFile(filePath, data, 0o644)
+}
+
+func (w *Worker) readReduceOrReplicaFile(fileName string) ([]byte, error) {
+    reducePath := filepath.Join(w.reduceDir(), filepath.Base(fileName))
+    if data, err := os.ReadFile(reducePath); err == nil {
+        return data, nil
+    }
+
+    replicaPath := filepath.Join(w.replicaDir(), filepath.Base(fileName))
+    return os.ReadFile(replicaPath)
 }
 
 func callRPC(address, method string, request any, response any) error {
