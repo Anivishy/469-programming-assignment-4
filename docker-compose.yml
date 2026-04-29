@@ -1,0 +1,95 @@
+services:
+  coordinator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ROLE: coordinator
+      COORDINATOR_BIND_ADDR: 0.0.0.0:9000
+      NUM_REDUCE_TASKS: 4
+      NUM_WORKERS: 4
+      MAX_VISITED_URLS: 900
+      WORKER_HOST_PREFIX: worker
+      WORKER_PORT_BASE: 9100
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./seed_urls.txt:/app/seed_urls.txt:ro
+
+  worker1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - coordinator
+    environment:
+      ROLE: worker
+      WORKER_ID: 1
+      WORKER_BIND_ADDR: 0.0.0.0:9101
+      WORKER_ADDR: worker1:9101
+      WORKER_DATA_DIR: /app/data
+      COORDINATOR_ADDR: coordinator:9000
+      NUM_WORKERS: 4
+      NUM_REDUCE_TASKS: 4
+    volumes:
+      - worker1_data:/app/data
+
+  worker2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - coordinator
+    environment:
+      ROLE: worker
+      WORKER_ID: 2
+      WORKER_BIND_ADDR: 0.0.0.0:9102
+      WORKER_ADDR: worker2:9102
+      WORKER_DATA_DIR: /app/data
+      COORDINATOR_ADDR: coordinator:9000
+      NUM_WORKERS: 4
+      NUM_REDUCE_TASKS: 4
+    volumes:
+      - worker2_data:/app/data
+
+  worker3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - coordinator
+    environment:
+      ROLE: worker
+      WORKER_ID: 3
+      WORKER_BIND_ADDR: 0.0.0.0:9103
+      WORKER_ADDR: worker3:9103
+      WORKER_DATA_DIR: /app/data
+      COORDINATOR_ADDR: coordinator:9000
+      NUM_WORKERS: 4
+      NUM_REDUCE_TASKS: 4
+    volumes:
+      - worker3_data:/app/data
+
+  worker4:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - coordinator
+    environment:
+      ROLE: worker
+      WORKER_ID: 4
+      WORKER_BIND_ADDR: 0.0.0.0:9104
+      WORKER_ADDR: worker4:9104
+      WORKER_DATA_DIR: /app/data
+      COORDINATOR_ADDR: coordinator:9000
+      NUM_WORKERS: 4
+      NUM_REDUCE_TASKS: 4
+    volumes:
+      - worker4_data:/app/data
+
+volumes:
+  worker1_data:
+  worker2_data:
+  worker3_data:
+  worker4_data:
