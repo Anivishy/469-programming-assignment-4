@@ -23,12 +23,12 @@ import (
 )
 
 const (
-	taskPollInterval  = 2 * time.Second
+	taskPollInterval = 2 * time.Second
 	heartbeatInterval = 10 * time.Second
-	rpcDialTimeout    = 5 * time.Second
-	rpcRetryDelay     = 2 * time.Second
-	pageFetchTimeout  = 10 * time.Second
-	maxPageBytes      = 2 * 1024 * 1024
+	rpcDialTimeout = 5 * time.Second
+	rpcRetryDelay = 2 * time.Second
+	pageFetchTimeout = 10 * time.Second
+	maxPageBytes = 2 * 1024 * 1024
 )
 
 var hrefPattern = regexp.MustCompile(`(?i)href\s*=\s*["']([^"'#]+)["']`)
@@ -38,31 +38,31 @@ var wordPattern = regexp.MustCompile(`[A-Za-z0-9]+`)
 type Worker struct {
 	mu sync.Mutex
 
-	id              int
-	bindAddr        string
-	advertiseAddr   string
+	id int
+	bindAddr string
+	advertiseAddr string
 	coordinatorAddr string
-	dataDir         string
-	keepAlive       bool
-	searchReady     bool
+	dataDir string
+	keepAlive bool
+	searchReady bool
 	currentTaskType common.TaskType
-	currentTaskID   int
+	currentTaskID int
 
 	httpClient *http.Client
-	done       chan struct{}
-	once       sync.Once
+	done chan struct{}
+	once sync.Once
 }
 
 func StartWorker(workerID int, bindAddr, advertiseAddr, coordinatorAddr, dataDir string) {
 	worker := &Worker{
-		id:              workerID,
-		bindAddr:        bindAddr,
-		advertiseAddr:   advertiseAddr,
+		id: workerID,
+		bindAddr: bindAddr,
+		advertiseAddr: advertiseAddr,
 		coordinatorAddr: coordinatorAddr,
-		dataDir:         dataDir,
-		keepAlive:       os.Getenv("KEEP_ALIVE") == "1",
-		httpClient:      &http.Client{Timeout: pageFetchTimeout},
-		done:            make(chan struct{}),
+		dataDir: dataDir,
+		keepAlive: os.Getenv("KEEP_ALIVE") == "1",
+		httpClient: &http.Client{Timeout: pageFetchTimeout},
+		done: make(chan struct{}),
 	}
 
 	if err := worker.run(); err != nil {
@@ -146,10 +146,10 @@ func (w *Worker) sendHeartbeat() {
 	currentTaskType, currentTaskID := w.currentTaskSnapshot()
 
 	request := common.HeartBeatRequest{
-		WorkerID:        w.id,
-		WorkerAddr:      w.advertiseAddr,
+		WorkerID: w.id,
+		WorkerAddr: w.advertiseAddr,
 		CurrentTaskType: currentTaskType,
-		CurrentTaskID:   currentTaskID,
+		CurrentTaskID: currentTaskID,
 	}
 
 	var response common.HeartBeatResponse
@@ -258,7 +258,7 @@ func (w *Worker) Search(request common.WorkerSearchRequest, response *common.Wor
 
 func (w *Worker) requestTask() (common.TaskResponse, error) {
 	request := common.TaskRequest{
-		WorkerID:   w.id,
+		WorkerID: w.id,
 		WorkerAddr: w.advertiseAddr,
 	}
 
@@ -300,11 +300,11 @@ func (w *Worker) executeTask(task common.TaskResponse) common.TaskDoneRequest {
 		return w.executeReplicateTask(task)
 	default:
 		return common.TaskDoneRequest{
-			WorkerID:     w.id,
-			WorkerAddr:   w.advertiseAddr,
-			TaskType:     task.TaskType,
-			TaskID:       task.TaskID,
-			TaskSuccess:  false,
+			WorkerID: w.id,
+			WorkerAddr: w.advertiseAddr,
+			TaskType: task.TaskType,
+			TaskID: task.TaskID,
+			TaskSuccess: false,
 			ErrorMessage: "unsupported task type",
 		}
 	}
@@ -312,10 +312,10 @@ func (w *Worker) executeTask(task common.TaskResponse) common.TaskDoneRequest {
 
 func (w *Worker) executeMapTask(task common.TaskResponse) common.TaskDoneRequest {
 	completion := common.TaskDoneRequest{
-		WorkerID:   w.id,
+		WorkerID: w.id,
 		WorkerAddr: w.advertiseAddr,
-		TaskType:   common.MapTask,
-		TaskID:     task.TaskID,
+		TaskType: common.MapTask,
+		TaskID: task.TaskID,
 	}
 
 	if task.NumReduce <= 0 {
@@ -370,10 +370,10 @@ func (w *Worker) executeMapTask(task common.TaskResponse) common.TaskDoneRequest
 
 func (w *Worker) executeReduceTask(task common.TaskResponse) common.TaskDoneRequest {
 	completion := common.TaskDoneRequest{
-		WorkerID:   w.id,
+		WorkerID: w.id,
 		WorkerAddr: w.advertiseAddr,
-		TaskType:   common.ReduceTask,
-		TaskID:     task.TaskID,
+		TaskType: common.ReduceTask,
+		TaskID: task.TaskID,
 	}
 
 	combined := make(map[string]map[string]struct{})
@@ -426,10 +426,10 @@ func (w *Worker) executeReduceTask(task common.TaskResponse) common.TaskDoneRequ
 
 func (w *Worker) executeReplicateTask(task common.TaskResponse) common.TaskDoneRequest {
 	completion := common.TaskDoneRequest{
-		WorkerID:   w.id,
+		WorkerID: w.id,
 		WorkerAddr: w.advertiseAddr,
-		TaskType:   common.ReplicateTask,
-		TaskID:     task.TaskID,
+		TaskType: common.ReplicateTask,
+		TaskID: task.TaskID,
 	}
 
 	if task.ReplicaFile == "" {
@@ -558,9 +558,9 @@ func (w *Worker) transferIntermediateFile(mapTaskID int, reduceID int, fileName 
 
 	request := common.IntermediateTransferRequest{
 		FromWorkerID: w.id,
-		MapTaskID:    mapTaskID,
-		ReduceID:     reduceID,
-		Data:         string(data),
+		MapTaskID: mapTaskID,
+		ReduceID: reduceID,
+		Data: string(data),
 	}
 	var response common.IntermediateTransferResponse
 
@@ -575,9 +575,9 @@ func (w *Worker) transferReplicaFile(reduceID int, fileName string, destinationA
 
 	request := common.ReplicaTransferRequest{
 		FromWorkerID: w.id,
-		ReduceID:     reduceID,
-		FileName:     fileName,
-		Data:         string(data),
+		ReduceID: reduceID,
+		FileName: fileName,
+		Data: string(data),
 	}
 	var response common.ReplicaTransferResponse
 

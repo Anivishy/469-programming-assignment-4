@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"net"
 	"net/rpc"
@@ -22,48 +23,49 @@ const heartbeatTimeout = 30 * time.Second
 const heartbeatCheckInterval = 10 * time.Second
 
 type PendingTask struct {
-	id                    int
-	batchUrls             []string
-	intermediateFiles     []common.IntermediateFileRef
-	outputFiles           []string
-	file                  string
-	taskType              common.TaskType
-	status                string
-	ownerWorker           int
-	destinationWorker     int
+	id int
+	batchUrls []string
+	intermediateFiles []common.IntermediateFileRef
+	outputFiles []string
+	file string
+	taskType common.TaskType
+	status string
+	ownerWorker int
+	destinationWorker int
 	destinationWorkerAddr string
-	reduceID              int
+	reduceID int
 }
 
 type ReduceOutputState struct {
-	reduceID            int
-	fileName            string
-	primaryWorker       int
-	holders             map[int]bool
+	reduceID int
+	fileName string
+	primaryWorker int
+	holders map[int]bool
 	pendingReplicaTasks map[int]bool
 }
 
 type CoordinatorAPI struct {
-	Tasks               []PendingTask
-	MapTasks            []PendingTask
-	ReduceTasks         []PendingTask
-	R                   int
-	numWorkers          int
-	MaxVisitedUrls      int
-	VisitedUrlCount     int
+	Tasks []PendingTask
+	MapTasks []PendingTask
+	ReduceTasks []PendingTask
+	R int
+	numWorkers int
+	MaxVisitedUrls int
+	VisitedUrlCount int
 	DesiredReplicaCount int
-	CompleteTaskCount   int
-	TasksComplete       bool
-	currentPhase        common.TaskType
-	frontier            []string
-	seenUrls            map[string]bool
-	workerAddresses     map[int]string
-	workerHostPrefix    string
-	workerPortBase      int
-	lastHeartBeat       map[int]time.Time
-	failedWorkers       map[int]bool
-	ReduceOutputs       map[int]*ReduceOutputState
-	mu                  sync.Mutex
+	CompleteTaskCount int
+	TasksComplete bool
+	currentPhase common.TaskType
+	frontier []string
+	seenUrls map[string]bool
+	workerAddresses map[int]string
+	workerHostPrefix string
+	workerPortBase int
+	lastHeartBeat map[int]time.Time
+	failedWorkers map[int]bool
+	ReduceOutputs map[int]*ReduceOutputState
+	logger *log.Logger
+	mu sync.Mutex
 }
 
 func (coord *CoordinatorAPI) RequestTask(request common.TaskRequest, response *common.TaskResponse) error {
@@ -112,6 +114,7 @@ func (coord *CoordinatorAPI) Search(request common.SearchRequest, response *comm
 	response.WorkerID = workerID
 	response.WorkerAddr = coord.workerAddresses[workerID]
 	response.FileName = output.fileName
+	coord.logf("ASSIGN SEARCH %s TO WORKER %d", keyword, workerID)
 	return nil
 }
 
@@ -123,8 +126,8 @@ func (coord *CoordinatorAPI) GetWork(request common.TaskRequest, response *commo
 	coord.reassignTimedOutWorkers()
 
 	*response = common.TaskResponse{
-		TaskType:  common.WaitTask,
-		NumMap:    len(coord.MapTasks),
+		TaskType: common.WaitTask,
+		NumMap: len(coord.MapTasks),
 		NumReduce: coord.R,
 	}
 
@@ -187,6 +190,15 @@ func (coord *CoordinatorAPI) GetWork(request common.TaskRequest, response *commo
 			coord.ReduceTasks[coord.Tasks[i].id] = coord.Tasks[i]
 		}
 
+		switch response.TaskType {
+		case common.MapTask:
+			coord.logf("ASSIGN MAP TASK %d TO WORKER %d", response.TaskID, response.OwnerWorker)
+		case common.ReduceTask:
+			coord.logf("ASSIGN REDUCE TASK %d TO WORKER %d", response.TaskID, response.OwnerWorker)
+		case common.ReplicateTask:
+			coord.logf("REPLICATE %s ON WORKER %d", response.ReplicaFile, response.ReplicaDestinationWorker)
+		}
+
 		return nil
 	}
 
@@ -230,6 +242,7 @@ func (coord *CoordinatorAPI) CompleteWork(request common.TaskDoneRequest, respon
 	if request.TaskType == common.MapTask {
 		coord.Tasks[request.TaskID].intermediateFiles = coord.buildIntermediateFiles(request.TaskID, request.OutputFiles)
 		coord.MapTasks[request.TaskID] = coord.Tasks[request.TaskID]
+		coord.logf("GET MAP TASK %d RESULT", request.TaskID)
 		coord.addDiscoveredUrls(request.DiscoveredUrls)
 		coord.createMapTasksFromFrontier()
 	}
@@ -267,11 +280,11 @@ func (coord *CoordinatorAPI) initializeReduceTasks() {
 
 	for i := 0; i < coord.R; i++ {
 		reduceTask := PendingTask{
-			id:          i,
-			taskType:    common.ReduceTask,
-			status:      "idle",
+			id: i,
+			taskType: common.ReduceTask,
+			status: "idle",
 			ownerWorker: coord.reduceOwner(i),
-			reduceID:    i,
+			reduceID: i,
 		}
 
 		for mapTaskID := range len(coord.MapTasks) {
@@ -311,18 +324,19 @@ func StartCoordinator(r int, numWorkers int, maxVisitedUrls int, desiredReplicaC
 	}
 
 	coord := CoordinatorAPI{
-		R:                   r,
-		numWorkers:          numWorkers,
-		MaxVisitedUrls:      maxVisitedUrls,
+		R: r,
+		numWorkers: numWorkers,
+		MaxVisitedUrls: maxVisitedUrls,
 		DesiredReplicaCount: desiredReplicaCount,
-		currentPhase:        common.MapTask,
-		seenUrls:            make(map[string]bool),
-		workerAddresses:     make(map[int]string),
-		workerHostPrefix:    getEnvString("WORKER_HOST_PREFIX", "worker"),
-		workerPortBase:      getEnvInt("WORKER_PORT_BASE", 9100),
-		lastHeartBeat:       make(map[int]time.Time),
-		failedWorkers:       make(map[int]bool),
-		ReduceOutputs:       make(map[int]*ReduceOutputState),
+		currentPhase: common.MapTask,
+		seenUrls: make(map[string]bool),
+		workerAddresses: make(map[int]string),
+		workerHostPrefix: getEnvString("WORKER_HOST_PREFIX", "worker"),
+		workerPortBase: getEnvInt("WORKER_PORT_BASE", 9100),
+		lastHeartBeat: make(map[int]time.Time),
+		failedWorkers: make(map[int]bool),
+		ReduceOutputs: make(map[int]*ReduceOutputState),
+		logger: newCoordinatorLogger(),
 	}
 
 	for workerID := 1; workerID <= numWorkers; workerID++ {
@@ -414,10 +428,10 @@ func (coord *CoordinatorAPI) createMapTasksFromFrontier() {
 		}
 
 		task := PendingTask{
-			id:          len(coord.MapTasks),
-			batchUrls:   append([]string(nil), coord.frontier[:batchEnd]...),
-			taskType:    common.MapTask,
-			status:      "idle",
+			id: len(coord.MapTasks),
+			batchUrls: append([]string(nil), coord.frontier[:batchEnd]...),
+			taskType: common.MapTask,
+			status: "idle",
 			ownerWorker: (len(coord.MapTasks) % coord.numWorkers) + 1,
 		}
 
@@ -453,10 +467,10 @@ func (coord *CoordinatorAPI) buildIntermediateFiles(taskID int, outputFiles []st
 		}
 
 		intermediateFiles = append(intermediateFiles, common.IntermediateFileRef{
-			MapTaskID:  taskID,
-			ReduceID:   reduceID,
-			FileName:   fileName,
-			WorkerID:   ownerWorker,
+			MapTaskID: taskID,
+			ReduceID: reduceID,
+			FileName: fileName,
+			WorkerID: ownerWorker,
 			WorkerAddr: coord.workerAddresses[ownerWorker],
 		})
 	}
@@ -484,6 +498,7 @@ func (coord *CoordinatorAPI) restoreMissingMapTasks(missingInputs []common.Inter
 		coord.MapTasks[mapTaskID].ownerWorker = coord.reassignWorker(mapTaskID, 0)
 		coord.MapTasks[mapTaskID].outputFiles = nil
 		coord.MapTasks[mapTaskID].intermediateFiles = nil
+		coord.logf("REASSIGN MAP TASK %d TO WORKER %d", mapTaskID, coord.MapTasks[mapTaskID].ownerWorker)
 	}
 
 	for i := range len(coord.MapTasks) {
@@ -535,6 +550,7 @@ func (coord *CoordinatorAPI) resetMapTask(taskID int, failedWorker int) {
 	coord.Tasks[taskID].outputFiles = nil
 	coord.Tasks[taskID].intermediateFiles = nil
 	coord.MapTasks[taskID] = coord.Tasks[taskID]
+	coord.logf("REASSIGN MAP TASK %d TO WORKER %d", taskID, coord.Tasks[taskID].ownerWorker)
 }
 
 func (coord *CoordinatorAPI) resetReduceTask(taskID int, failedWorker int) {
@@ -595,10 +611,10 @@ func (coord *CoordinatorAPI) updateCompletionState() {
 
 func (coord *CoordinatorAPI) recordReduceOutput(reduceID int, workerID int, fileName string) {
 	coord.ReduceOutputs[reduceID] = &ReduceOutputState{
-		reduceID:            reduceID,
-		fileName:            fileName,
-		primaryWorker:       workerID,
-		holders:             map[int]bool{workerID: true},
+		reduceID: reduceID,
+		fileName: fileName,
+		primaryWorker: workerID,
+		holders: map[int]bool{workerID: true},
 		pendingReplicaTasks: make(map[int]bool),
 	}
 }
@@ -637,14 +653,14 @@ func (coord *CoordinatorAPI) appendMissingReplicationTasks() {
 			}
 
 			task := PendingTask{
-				id:                    len(coord.Tasks),
-				file:                  output.fileName,
-				taskType:              common.ReplicateTask,
-				status:                "idle",
-				ownerWorker:           sourceWorker,
-				destinationWorker:     destinationWorker,
+				id: len(coord.Tasks),
+				file: output.fileName,
+				taskType: common.ReplicateTask,
+				status: "idle",
+				ownerWorker: sourceWorker,
+				destinationWorker: destinationWorker,
 				destinationWorkerAddr: coord.workerAddresses[destinationWorker],
-				reduceID:              reduceID,
+				reduceID: reduceID,
 			}
 
 			coord.Tasks = append(coord.Tasks, task)
@@ -835,6 +851,7 @@ func (coord *CoordinatorAPI) reassignTimedOutWorkers() {
 		}
 
 		coord.failedWorkers[workerID] = true
+		coord.logf("HEARTBEAT FAILED FROM WORKER %d", workerID)
 		log.Printf("Worker %d heartbeat timed out, reassigning tasks", workerID)
 		coord.reassignWorkerTasks(workerID)
 	}
@@ -891,6 +908,7 @@ func (coord *CoordinatorAPI) resetOwnedMapTasks(workerID int) {
 		coord.MapTasks[mapTaskID].ownerWorker = coord.reassignWorker(mapTaskID, workerID)
 		coord.MapTasks[mapTaskID].outputFiles = nil
 		coord.MapTasks[mapTaskID].intermediateFiles = nil
+		coord.logf("REASSIGN MAP TASK %d TO WORKER %d", mapTaskID, coord.MapTasks[mapTaskID].ownerWorker)
 		if mapTaskID < len(coord.Tasks) {
 			coord.Tasks[mapTaskID] = coord.MapTasks[mapTaskID]
 		}
@@ -1045,4 +1063,29 @@ func partitionWord(word string, numReduce int) int {
 	hasher := fnv.New32a()
 	_, _ = hasher.Write([]byte(word))
 	return int(hasher.Sum32() % uint32(numReduce))
+}
+
+func newCoordinatorLogger() *log.Logger {
+	logFile := getEnvString("COORDINATOR_LOG_FILE", "coordinator.log")
+	logDir := filepath.Dir(logFile)
+	if logDir != "." && logDir != "" {
+		if err := os.MkdirAll(logDir, 0o755); err != nil {
+			panic(fmt.Sprintf("failed to create coordinator log directory: %v", err))
+		}
+	}
+
+	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		panic(fmt.Sprintf("failed to open coordinator log file: %v", err))
+	}
+
+	return log.New(io.MultiWriter(os.Stdout, file), "", 0)
+}
+
+func (coord *CoordinatorAPI) logf(format string, args ...any) {
+	if coord.logger == nil {
+		return
+	}
+
+	coord.logger.Printf(format, args...)
 }

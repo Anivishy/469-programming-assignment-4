@@ -51,7 +51,7 @@ func StartClient(clientID int, coordinatorAddr string, threads int, keyword stri
 				request := common.SearchRequest{
 					ClientID: clientID,
 					ThreadID: threadID,
-					Keyword:  keyword,
+					Keyword: keyword,
 				}
 
 				var response common.SearchResponse
@@ -61,7 +61,7 @@ func StartClient(clientID int, coordinatorAddr string, threads int, keyword stri
 					log.Printf("client %d thread %d search not ready yet", clientID, threadID)
 				} else {
 					workerRequest := common.WorkerSearchRequest{
-						Keyword:  keyword,
+						Keyword: keyword,
 						FileName: response.FileName,
 					}
 					var workerResponse common.WorkerSearchResponse

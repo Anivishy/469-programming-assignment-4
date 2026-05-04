@@ -12,10 +12,12 @@ services:
       NUM_OUTPUT_REPLICAS: 1
       WORKER_HOST_PREFIX: worker
       WORKER_PORT_BASE: 9100
+      COORDINATOR_LOG_FILE: /app/logs/coordinator.log
     ports:
       - "9000:9000"
     volumes:
       - ./seed_urls.txt:/app/seed_urls.txt:ro
+      - ./logs:/app/logs
 
   worker1:
     build:

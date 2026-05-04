@@ -3,67 +3,67 @@ package common
 type TaskType string
 
 const (
-	MapTask       TaskType = "map"
-	ReduceTask    TaskType = "reduce"
+	MapTask TaskType = "map"
+	ReduceTask TaskType = "reduce"
 	ReplicateTask TaskType = "replicate"
-	WaitTask      TaskType = "wait"
-	DoneTask      TaskType = "done"
+	WaitTask TaskType = "wait"
+	DoneTask TaskType = "done"
 )
 
 // heartbeat api
 
 type HeartBeatRequest struct {
-	WorkerID        int
-	WorkerAddr      string
+	WorkerID int
+	WorkerAddr string
 	CurrentTaskType TaskType
-	CurrentTaskID   int
+	CurrentTaskID int
 }
 
 type HeartBeatResponse struct {
-	Acknowledged    bool
+	Acknowledged bool
 	CoordinatorDone bool
 }
 
 // task api
 
 type TaskRequest struct {
-	WorkerID   int
+	WorkerID int
 	WorkerAddr string
 }
 
 type IntermediateFileRef struct {
-	MapTaskID  int
-	ReduceID   int
-	FileName   string
-	WorkerID   int
+	MapTaskID int
+	ReduceID int
+	FileName string
+	WorkerID int
 	WorkerAddr string
 }
 
 type TaskResponse struct {
-	TaskType                 TaskType
-	TaskID                   int
-	NumMap                   int
-	NumReduce                int
-	BatchUrls                []string
-	FileNames                []string
-	IntermediateFiles        []IntermediateFileRef
-	OwnerWorker              int
-	ReplicaFile              string
-	ReplicaReduceID          int
+	TaskType TaskType
+	TaskID int
+	NumMap int
+	NumReduce int
+	BatchUrls []string
+	FileNames []string
+	IntermediateFiles []IntermediateFileRef
+	OwnerWorker int
+	ReplicaFile string
+	ReplicaReduceID int
 	ReplicaDestinationWorker int
-	ReplicaDestinationAddr   string
+	ReplicaDestinationAddr string
 }
 
 type TaskDoneRequest struct {
-	WorkerID       int
-	WorkerAddr     string
-	TaskType       TaskType
-	TaskID         int
+	WorkerID int
+	WorkerAddr string
+	TaskType TaskType
+	TaskID int
 	DiscoveredUrls []string
-	OutputFiles    []string
-	TaskSuccess    bool
-	ErrorMessage   string
-	MissingInputs  []IntermediateFileRef
+	OutputFiles []string
+	TaskSuccess bool
+	ErrorMessage string
+	MissingInputs []IntermediateFileRef
 }
 
 type TaskDoneResponse struct {
@@ -74,18 +74,18 @@ type TaskDoneResponse struct {
 type SearchRequest struct {
 	ClientID int
 	ThreadID int
-	Keyword  string
+	Keyword string
 }
 
 type SearchResponse struct {
-	Ready      bool
-	WorkerID   int
+	Ready bool
+	WorkerID int
 	WorkerAddr string
-	FileName   string
+	FileName string
 }
 
 type WorkerSearchRequest struct {
-	Keyword  string
+	Keyword string
 	FileName string
 }
 
@@ -96,9 +96,9 @@ type WorkerSearchResponse struct {
 // worker to worker file transfer
 type IntermediateTransferRequest struct {
 	FromWorkerID int
-	MapTaskID    int
-	ReduceID     int
-	Data         string
+	MapTaskID int
+	ReduceID int
+	Data string
 }
 
 type IntermediateTransferResponse struct {
@@ -107,9 +107,9 @@ type IntermediateTransferResponse struct {
 
 type ReplicaTransferRequest struct {
 	FromWorkerID int
-	ReduceID     int
-	FileName     string
-	Data         string
+	ReduceID int
+	FileName string
+	Data string
 }
 
 type ReplicaTransferResponse struct {
