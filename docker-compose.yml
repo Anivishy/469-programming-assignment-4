@@ -105,6 +105,7 @@ services:
       COORDINATOR_ADDR: coordinator:9000
       CLIENT_THREADS: 2
       CLIENT_SEARCH_KEYWORD: the
+      CLIENT_REQUEST_DELAY_MS: 3000
       KEEP_ALIVE: "1"
 
   client2:
@@ -119,6 +120,7 @@ services:
       COORDINATOR_ADDR: coordinator:9000
       CLIENT_THREADS: 2
       CLIENT_SEARCH_KEYWORD: the
+      CLIENT_REQUEST_DELAY_MS: 3000
       KEEP_ALIVE: "1"
 
 volumes:

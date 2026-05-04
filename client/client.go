@@ -20,65 +20,72 @@ func StartClient(clientID int, coordinatorAddr string, threads int, keyword stri
 		threads = 1
 	}
 
+	requestDelay := 3 * time.Second
+	if delayValue := strings.TrimSpace(os.Getenv("CLIENT_REQUEST_DELAY_MS")); delayValue != "" {
+		if delayMs, err := time.ParseDuration(delayValue + "ms"); err == nil && delayMs > 0 {
+			requestDelay = delayMs
+		}
+	}
+
+	keepAlive := os.Getenv("KEEP_ALIVE") == "1"
 	keyword = strings.TrimSpace(keyword)
 	if keyword == "" {
 		keyword = "the"
 	}
 
-	log.Printf("client %d ready coordinator=%s threads=%d keyword=%s", clientID, coordinatorAddr, threads, keyword)
+	log.Printf(
+		"client %d ready coordinator=%s threads=%d keyword=%s delay=%s",
+		clientID,
+		coordinatorAddr,
+		threads,
+		keyword,
+		requestDelay,
+	)
 
 	var wg sync.WaitGroup
 	for threadID := 1; threadID <= threads; threadID++ {
 		wg.Add(1)
 		go func(threadID int) {
 			defer wg.Done()
-			request := common.SearchRequest{
-				ClientID: clientID,
-				ThreadID: threadID,
-				Keyword:  keyword,
-			}
+			for {
+				request := common.SearchRequest{
+					ClientID: clientID,
+					ThreadID: threadID,
+					Keyword:  keyword,
+				}
 
-			var response common.SearchResponse
-			if err := callRPC(coordinatorAddr, "Coordinator.Search", request, &response); err != nil {
-				log.Printf("client %d thread %d search request failed: %v", clientID, threadID, err)
-				return
-			}
+				var response common.SearchResponse
+				if err := callRPC(coordinatorAddr, "Coordinator.Search", request, &response); err != nil {
+					log.Printf("client %d thread %d search request failed: %v", clientID, threadID, err)
+				} else if !response.Ready || response.WorkerAddr == "" || response.FileName == "" {
+					log.Printf("client %d thread %d search not ready yet", clientID, threadID)
+				} else {
+					workerRequest := common.WorkerSearchRequest{
+						Keyword:  keyword,
+						FileName: response.FileName,
+					}
+					var workerResponse common.WorkerSearchResponse
+					if err := callRPC(response.WorkerAddr, "Worker.Search", workerRequest, &workerResponse); err != nil {
+						log.Printf("client %d thread %d worker search failed: %v", clientID, threadID, err)
+					} else {
+						urlsJSON, err := json.Marshal(workerResponse.URLs)
+						if err != nil {
+							log.Printf("client %d thread %d worker=%d urls=%d", clientID, threadID, response.WorkerID, len(workerResponse.URLs))
+						} else {
+							log.Printf("client %d thread %d worker=%d urls=%s", clientID, threadID, response.WorkerID, string(urlsJSON))
+						}
+					}
+				}
 
-			if !response.Ready || response.WorkerAddr == "" || response.FileName == "" {
-				log.Printf("client %d thread %d search not ready yet", clientID, threadID)
-				return
-			}
+				if !keepAlive {
+					return
+				}
 
-			workerRequest := common.WorkerSearchRequest{
-				Keyword:  keyword,
-				FileName: response.FileName,
+				time.Sleep(requestDelay)
 			}
-			var workerResponse common.WorkerSearchResponse
-			if err := callRPC(response.WorkerAddr, "Worker.Search", workerRequest, &workerResponse); err != nil {
-				log.Printf("client %d thread %d worker search failed: %v", clientID, threadID, err)
-				return
-			}
-
-			urlsJSON, err := json.Marshal(workerResponse.URLs)
-			if err != nil {
-				log.Printf("client %d thread %d worker=%d urls=%d", clientID, threadID, response.WorkerID, len(workerResponse.URLs))
-				return
-			}
-
-			log.Printf(
-				"client %d thread %d worker=%d urls=%s",
-				clientID,
-				threadID,
-				response.WorkerID,
-				string(urlsJSON),
-			)
 		}(threadID)
 	}
 	wg.Wait()
-
-	if os.Getenv("KEEP_ALIVE") == "1" {
-		select {}
-	}
 }
 
 func callRPC(address, method string, request any, response any) error {
