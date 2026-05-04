@@ -3,6 +3,7 @@ package coordinator
 import (
 	"bufio"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net"
 	"net/rpc"
@@ -88,6 +89,29 @@ func (coord *CoordinatorAPI) Search(request common.SearchRequest, response *comm
 	defer coord.mu.Unlock()
 
 	response.Ready = coord.currentPhase == common.DoneTask
+	if !response.Ready {
+		return nil
+	}
+
+	keyword := strings.ToLower(strings.TrimSpace(request.Keyword))
+	if keyword == "" {
+		return nil
+	}
+
+	reduceID := partitionWord(keyword, coord.R)
+	output := coord.ReduceOutputs[reduceID]
+	if output == nil {
+		return nil
+	}
+
+	workerID := coord.pickSearchWorker(output)
+	if workerID == 0 {
+		return nil
+	}
+
+	response.WorkerID = workerID
+	response.WorkerAddr = coord.workerAddresses[workerID]
+	response.FileName = output.fileName
 	return nil
 }
 
@@ -718,6 +742,27 @@ func (coord *CoordinatorAPI) pickReplicaDestinationWorker(output *ReduceOutputSt
 	return bestWorkerID
 }
 
+func (coord *CoordinatorAPI) pickSearchWorker(output *ReduceOutputState) int {
+	if output == nil {
+		return 0
+	}
+
+	if output.holders[output.primaryWorker] && !coord.failedWorkers[output.primaryWorker] {
+		return output.primaryWorker
+	}
+
+	for workerID := 1; workerID <= coord.numWorkers; workerID++ {
+		if coord.failedWorkers[workerID] {
+			continue
+		}
+		if output.holders[workerID] {
+			return workerID
+		}
+	}
+
+	return 0
+}
+
 func (coord *CoordinatorAPI) replicaUtilization(workerID int) int {
 	replicaCount := 0
 
@@ -990,4 +1035,14 @@ func firstFileName(outputFiles []string, reduceID int) string {
 	}
 
 	return fmt.Sprintf("reduce-%03d.json", reduceID)
+}
+
+func partitionWord(word string, numReduce int) int {
+	if numReduce <= 1 {
+		return 0
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(word))
+	return int(hasher.Sum32() % uint32(numReduce))
 }
