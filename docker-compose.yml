@@ -99,6 +99,8 @@ services:
       ROLE: client
       CLIENT_ID: 1
       COORDINATOR_ADDR: coordinator:9000
+      CLIENT_THREADS: 2
+      CLIENT_SEARCH_KEYWORD: the
       KEEP_ALIVE: "1"
 
   client2:
@@ -111,6 +113,8 @@ services:
       ROLE: client
       CLIENT_ID: 2
       COORDINATOR_ADDR: coordinator:9000
+      CLIENT_THREADS: 2
+      CLIENT_SEARCH_KEYWORD: the
       KEEP_ALIVE: "1"
 
 volumes:

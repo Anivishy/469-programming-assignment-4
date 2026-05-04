@@ -46,8 +46,10 @@ func main() {
 	case "client":
 		clientID := getEnvInt("CLIENT_ID", 1)
 		coordinatorAddr := getEnvString("COORDINATOR_ADDR", "127.0.0.1:9000")
+		threads := getEnvInt("CLIENT_THREADS", 1)
+		keyword := getEnvString("CLIENT_SEARCH_KEYWORD", "the")
 
-		client.StartClient(clientID, coordinatorAddr)
+		client.StartClient(clientID, coordinatorAddr, threads, keyword)
 	default:
 		panic("unsupported ROLE: " + role)
 	}
