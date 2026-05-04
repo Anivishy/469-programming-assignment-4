@@ -32,6 +32,7 @@ services:
       COORDINATOR_ADDR: coordinator:9000
       NUM_WORKERS: 4
       NUM_REDUCE_TASKS: 4
+      KEEP_ALIVE: "1"
     volumes:
       - worker1_data:/app/data
 
@@ -50,6 +51,7 @@ services:
       COORDINATOR_ADDR: coordinator:9000
       NUM_WORKERS: 4
       NUM_REDUCE_TASKS: 4
+      KEEP_ALIVE: "1"
     volumes:
       - worker2_data:/app/data
 
@@ -68,6 +70,7 @@ services:
       COORDINATOR_ADDR: coordinator:9000
       NUM_WORKERS: 4
       NUM_REDUCE_TASKS: 4
+      KEEP_ALIVE: "1"
     volumes:
       - worker3_data:/app/data
 
@@ -86,6 +89,7 @@ services:
       COORDINATOR_ADDR: coordinator:9000
       NUM_WORKERS: 4
       NUM_REDUCE_TASKS: 4
+      KEEP_ALIVE: "1"
     volumes:
       - worker4_data:/app/data
 

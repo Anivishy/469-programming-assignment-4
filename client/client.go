@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/json"
 	"log"
 	"net"
 	"net/rpc"
@@ -43,13 +44,33 @@ func StartClient(clientID int, coordinatorAddr string, threads int, keyword stri
 				return
 			}
 
+			if !response.Ready || response.WorkerAddr == "" || response.FileName == "" {
+				log.Printf("client %d thread %d search not ready yet", clientID, threadID)
+				return
+			}
+
+			workerRequest := common.WorkerSearchRequest{
+				Keyword:  keyword,
+				FileName: response.FileName,
+			}
+			var workerResponse common.WorkerSearchResponse
+			if err := callRPC(response.WorkerAddr, "Worker.Search", workerRequest, &workerResponse); err != nil {
+				log.Printf("client %d thread %d worker search failed: %v", clientID, threadID, err)
+				return
+			}
+
+			urlsJSON, err := json.Marshal(workerResponse.URLs)
+			if err != nil {
+				log.Printf("client %d thread %d worker=%d urls=%d", clientID, threadID, response.WorkerID, len(workerResponse.URLs))
+				return
+			}
+
 			log.Printf(
-				"client %d thread %d coordinator ready=%t worker=%d addr=%s",
+				"client %d thread %d worker=%d urls=%s",
 				clientID,
 				threadID,
-				response.Ready,
 				response.WorkerID,
-				response.WorkerAddr,
+				string(urlsJSON),
 			)
 		}(threadID)
 	}

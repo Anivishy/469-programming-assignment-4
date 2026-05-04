@@ -84,6 +84,15 @@ type SearchResponse struct {
 	FileName   string
 }
 
+type WorkerSearchRequest struct {
+	Keyword  string
+	FileName string
+}
+
+type WorkerSearchResponse struct {
+	URLs []string
+}
+
 // worker to worker file transfer
 type IntermediateTransferRequest struct {
 	FromWorkerID int
