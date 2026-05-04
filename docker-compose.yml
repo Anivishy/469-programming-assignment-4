@@ -89,6 +89,30 @@ services:
     volumes:
       - worker4_data:/app/data
 
+  client1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - coordinator
+    environment:
+      ROLE: client
+      CLIENT_ID: 1
+      COORDINATOR_ADDR: coordinator:9000
+      KEEP_ALIVE: "1"
+
+  client2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - coordinator
+    environment:
+      ROLE: client
+      CLIENT_ID: 2
+      COORDINATOR_ADDR: coordinator:9000
+      KEEP_ALIVE: "1"
+
 volumes:
   worker1_data:
   worker2_data:

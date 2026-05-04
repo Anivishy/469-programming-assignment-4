@@ -6,6 +6,7 @@ COPY go.mod ./
 COPY main.go ./
 COPY seed_urls.txt ./
 COPY common ./common
+COPY client ./client
 COPY coordinator ./coordinator
 COPY worker ./worker
 
